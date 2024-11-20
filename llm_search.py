@@ -1,13 +1,14 @@
 # Create Embeddings of fields of stream and stream_meta tables using Open AI embdding API
 
-from openai import OpenAI
-from dotenv import load_dotenv
+import streamlit as st
 import psycopg2
+import os
 import time
-import redis
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-import os
+from dotenv import load_dotenv
+from openai import OpenAI
+import redis
 
 load_dotenv()
 
@@ -15,7 +16,7 @@ load_dotenv()
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # r = redis.Redis(host='localhost', port=6379, db=0)
 
-# Connect Database
+# Database connection
 conn = psycopg2.connect(
     database=os.getenv("POSTGRESQL_DB_NAME"),
     user=os.getenv("POSTGRESQL_USER"),
@@ -39,24 +40,20 @@ def get_embedding_and_store(stream_id, text):
     embedding_str = ','.join(map(str, embedding))
     # print(embedding_str)
 
-    # Check if stream_id already exist
-    cursor.execute("SELECT embedding_vector FROM stream_embeddings WHERE id = %s", (stream_id,))
-    result = cursor.fetchone()
+    # Cache the embedding in Redis
+    # r.set(f"embedding:{stream_id}", embedding_str)
 
-    if not result:
-        # Store embedding in PostgreSQL db
-        cursor.execute(
+    # Store or update embedding in PostgreSQL db
+    cursor.execute(
             """
             INSERT INTO stream_embeddings (id, embedding_vector)
-            VALUES (%s, %s) ON CONFLICT (id) DO UPDATE SET embedding_vector = EXCLUDED.embedding_vector;
+            VALUES (%s, %s) 
+            ON CONFLICT (id) DO UPDATE SET embedding_vector = EXCLUDED.embedding_vector;
             """, (stream_id, embedding_str)
         )
-        conn.commit()
+    conn.commit()
 
-        # Cache the embedding in Redis
-        # r.set(f"embedding:{stream_id}", embedding_str)
-
-        print(f"Embedding for stream_id {stream_id} created and stored.")
+    st.success(f"Embedding for stream_id {stream_id} created and stored.")
 
 # Function to merge fields, generate embedding, and store it
 def process_stream_for_embedding(stream_id):
@@ -84,7 +81,7 @@ def process_stream_for_embedding(stream_id):
         get_embedding_and_store(stream_id, merged_text)
         
     except Exception as e:
-        print(f"Error processing stream_id {stream_id}: {e}")
+        st.error(f"Stream ID {stream_id} not found.")
 
 def get_cached_embedding(stream_id):
     cursor.execute("SELECT embedding_vector FROM stream_embeddings WHERE id = %s", (stream_id,))
@@ -119,23 +116,32 @@ def process_new_entries():
             table_name, row_id = new_entry
 
             # Process based on the table type
-            process_stream_for_embedding(row_id)
+            if table_name == "stream":
+                process_stream_for_embedding(row_id)
 
             # Mark entry as processed
             cursor.execute("UPDATE embeddings_queue SET processed = TRUE WHERE table_name = %s AND row_id = %s;", (table_name, row_id))
             conn.commit()
+
+            st.success(f"Processed new entry: {table_name} (ID: {row_id}).")
+            time.sleep(1)
         else:
             # No new entries, wait before checking again
+            st.info("No new entries found.")
             time.sleep(10)
 
 # Function to process all streams in batch
 def process_all_streams():
     try:
         # Fetch all unique stream_ids from the stream table
-        cursor.execute("SELECT id FROM stream;")
+        cursor.execute("SELECT id FROM stream WHERE predicting IS NULL;")
         stream_ids = cursor.fetchall()
+        st.write(f"Found {len(stream_ids)} streams to process.")
+
+        start = 0
 
         for stream_id_tuple in stream_ids:
+            start+=1
             stream_id = stream_id_tuple[0]
             process_stream_for_embedding(stream_id)
             # Pause briefly to avoid hitting rate limits
@@ -149,11 +155,11 @@ def find_closest_streams(user_query, top_n=5):
     query_embedding = get_embedding(user_query)
 
     # Fetch precomputed stream metadata embeddings from the database
-    cursor.execute("SELECT id, stream_id, description, embedding_vector FROM stream_embeddings")
+    cursor.execute("SELECT id, embedding_vector FROM stream_embeddings")
     streams = cursor.fetchall()
 
     # Calculate the similarity between streams and query
-    embeddings = np.array([np.fromstring(row[3], sep=',') for row in streams])
+    embeddings = np.array([np.fromstring(row[1], sep=',') for row in streams])
     similarities = cosine_similarity([query_embedding], embeddings)[0]
 
     # Get top N matches
@@ -163,9 +169,9 @@ def find_closest_streams(user_query, top_n=5):
     results = []
 
     for similarity, stream in top_matches:
-        stream_id = stream[1]
+        stream_id = stream[0]
 
-        cursor.execute("SELECT * FROM stream WHERE id = %s;", {stream_id,})
+        cursor.execute("SELECT * FROM stream WHERE id = %s;", (stream_id,))
         stream_data = cursor.fetchone()
 
         cursor.execute("SELECT * FROM stream_meta WHERE stream_id = %s", (stream_id,))
@@ -178,33 +184,46 @@ def find_closest_streams(user_query, top_n=5):
         }
         results.append(result)
     
-    for result in results:
-        print(f"Similarity: {result['similarity']}")
-        print("Stream Data:", result['stream_data'])
-        print("Stream Meta Data:")
-        for meta in result['stream_meta_data']:
-            print(meta)
-        print("\n" + "-"*50 + "\n")
-    
     return results
 
-if __name__ == "__main__":
-    try:
-        mode = input("Choose mode: (1) Process all streams, (2) Process new entries, (3) Query search: ")
+# Streamlit App
+st.title("Stream Embeddings and Query Search")
 
-        if mode == "1":
-            process_all_streams()
-        elif mode == "2":
-            process_new_entries()
-        elif mode == "3":
-            user_query = input("Enter your query: ")
-            find_closest_streams(user_query)
+menu = st.sidebar.selectbox(
+    "Select an option",
+    ["Process All Streams", "Process Single Stream", "Process New Entries", "Query Search"]
+)
+
+if menu == "Process All Streams":
+    st.header("Process All Streams")
+    if st.button("Start Processing"):
+        process_all_streams()
+
+elif menu == "Process Single Stream":
+    st.header("Process Single Stream")
+    stream_id = st.text_input("Enter Stream ID")
+    if st.button("Process"):
+        if stream_id:
+            process_stream_for_embedding(stream_id)
         else:
-            print("Invalid mode selected.")
-    
-    except KeyboardInterrupt:
-        print("Service interrupted.")
-    finally:
-        cursor.close()
-        conn.close()
-        print("Database connection closed.")
+            st.error("Please enter a valid Stream ID.")
+
+elif menu == "Process New Entries":
+    st.header("Process New Entries")
+    if st.button("Start Processing New Entires"):
+        process_new_entries()
+
+elif menu == "Query Search":
+    st.header("Query Search")
+    user_query = st.text_input("Enter your query")
+    top_n = st.number_input("Number of results", min_value=1, max_value=20, value=5)
+    if st.button("Search"):
+        if user_query:
+            results = find_closest_streams(user_query, top_n=top_n)
+            for result in results:
+                st.write(f"**Similarity:** {result['similarity']}")
+                st.write("**Stream Data**", result['stream_data'])
+                st.write("**Stream Meta Data:**", result['stream_meta_data'])
+                st.write("---")
+        else:
+            st.error("Please enter a query.")
