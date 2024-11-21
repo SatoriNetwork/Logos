@@ -1,217 +1,231 @@
-# Create Embeddings of fields of stream and stream_meta tables using Open AI embdding API
-
-import streamlit as st
-import psycopg2
 import os
 import time
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-from dotenv import load_dotenv
-from openai import OpenAI
 import redis
+import chromadb
+from dotenv import load_dotenv
+import psycopg2
+import streamlit as st
+import logging
 
+from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+
+# Load environment variables
 load_dotenv()
 
-# Initialize OpenAI Client and Redis
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-# r = redis.Redis(host='localhost', port=6379, db=0)
-
-# Database connection
-conn = psycopg2.connect(
-    database=os.getenv("POSTGRESQL_DB_NAME"),
-    user=os.getenv("POSTGRESQL_USER"),
-    password=os.getenv("POSTGRESQL_PASSWORD"),
-    host=os.getenv("POSTGRESQL_HOST"),
-    port=os.getenv("POSTGRESQL_PORT")
-)
-cursor = conn.cursor()
-
-# Function to generate embedding using OpenAI
-def get_embedding(text):
-    response = openai_client.embeddings.create(input=text, model="text-embedding-3-large")
-    return response.data[0].embedding
-
-# Function to get embedding and store
-def get_embedding_and_store(stream_id, text):
-    # Generate embdding
-    embedding = get_embedding(text)
-
-    # Convert embedding to string for storage
-    embedding_str = ','.join(map(str, embedding))
-    # print(embedding_str)
-
-    # Cache the embedding in Redis
-    # r.set(f"embedding:{stream_id}", embedding_str)
-
-    # Store or update embedding in PostgreSQL db
-    cursor.execute(
-            """
-            INSERT INTO stream_embeddings (id, embedding_vector)
-            VALUES (%s, %s) 
-            ON CONFLICT (id) DO UPDATE SET embedding_vector = EXCLUDED.embedding_vector;
-            """, (stream_id, embedding_str)
+class StreamEmbeddingManager:
+    def __init__(self):
+        # Initialize ChromaDB
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.openai_ef = OpenAIEmbeddingFunction(
+            api_key=self.openai_api_key,
+            model_name="text-embedding-3-large"
         )
-    conn.commit()
+        self.chroma_client = chromadb.PersistentClient(
+            path="./chroma"
+        )
+        self.collection_name = "satori"
+        
+        # PostgreSQL connection
+        self.conn = psycopg2.connect(
+            database=os.getenv("POSTGRESQL_DB_NAME"),
+            user=os.getenv("POSTGRESQL_USER"),
+            password=os.getenv("POSTGRESQL_PASSWORD"),
+            host=os.getenv("POSTGRESQL_HOST"),
+            port=os.getenv("POSTGRESQL_PORT")
+        )
+        self.cursor = self.conn.cursor()
 
-    st.success(f"Embedding for stream_id {stream_id} created and stored.")
+        # # Redis connection
+        # self.redis_client = redis.Redis(
+        #     host=os.getenv("REDIS_HOST", "localhost"),
+        #     port=os.getenv("REDIS_PORT", 6379),
+        #     db=os.getenv("REDIS_DB", 0),
+        #     decode_responses=True
+        # )
 
-# Function to merge fields, generate embedding, and store it
-def process_stream_for_embedding(stream_id):
-    try:
-        # Fetch necessary fields from stream and stream_meta tables
-        cursor.execute("""
+    def get_or_create_collection(self):
+        """Retrieve or create a collection in ChromaDB."""
+        return self.chroma_client.get_or_create_collection(
+            name=self.collection_name,
+            embedding_function=self.openai_ef,
+            metadata={"hnsw:space": "cosine"}
+        )
+
+    def store_embedding(self, stream_id, text):
+        """Generate and store embedding in ChromaDB."""
+
+        # Use ChromaDB's embedding function
+        collection = self.get_or_create_collection()
+        collection.add(
+            documents=[text],
+            ids=[f"stream_{stream_id}"],
+            metadatas=[{"stream_id": stream_id, "text": text}]
+        )
+
+    def process_stream_for_embedding(self, stream_id):
+        """Process a stream to generate and store its embedding."""
+        self.cursor.execute("""
             SELECT s.source, s.description, s.tags, sm.entity, sm.attribute
             FROM stream AS s
             LEFT JOIN stream_meta AS sm ON s.id = sm.stream_id
             WHERE s.id = %s;
         """, (stream_id,))
+        result = self.cursor.fetchone()
 
-        # Retrieve the result
-        source, description, tags, entity, attribute = cursor.fetchone()
+        if not result:
+            st.error(f"Stream ID {stream_id} not found.")
+            return
 
-        # Check if entity and attribute are available
+        source, description, tags, entity, attribute = result
+        text_parts = [
+            f"Source: {source}", f"Description: {description}", f"Tags: {tags}"
+        ]
         if entity and attribute:
-            # Concatenate all fields
-            merged_text = f"Source: {source}. Description: {description}. Tags: {tags}. Entity: {entity}. Attribute: {attribute}."
-        else:
-            # Concatenate only stream fields
-            merged_text = f"Source: {source}. Description: {description}. Tags: {tags}."
+            text_parts.extend([f"Entity: {entity}", f"Attribute: {attribute}"])
+        merged_text = ". ".join(text_parts)
 
-        # Call the embedding function with the concatenated text
-        get_embedding_and_store(stream_id, merged_text)
-        
-    except Exception as e:
-        st.error(f"Stream ID {stream_id} not found.")
+        self.store_embedding(stream_id, merged_text)
 
-def get_cached_embedding(stream_id):
-    cursor.execute("SELECT embedding_vector FROM stream_embeddings WHERE id = %s", (stream_id,))
-    result = cursor.fetchone()
-    if result:
-        embedding_str = result[0]
-        # r.set(f"embedding:{stream_id}", embedding_str)
-        return np.fromstring(embedding_str, sep=',')
-    return None
-    # # Attempt to retrieve embedding from Redis cache
-    # embedding_str = r.get(f"embedding:{stream_id}")
-    # if embedding_str:
-    #     return np.fromstring(embedding_str.decode('utf-8'), sep=',')
-    # else:
-    #     # If not cached, fetch from PostgreSQL and cache it
-    #     cursor.execute("SELECT embedding_vector FROM stream_embeddings WHERE id = %s", (stream_id,))
-    #     result = cursor.fetchone()
-    #     if result:
-    #         embedding_str = result[0]
-    #         r.set(f"embedding:{stream_id}", embedding_str)
-    #         return np.fromstring(embedding_str, sep=',')
-    # return None
-
-# Function to process new entries in embeddings_queue
-def process_new_entries():
-    while True:
-        # Check for new entries in the embeddings queue
-        cursor.execute("SELECT table_name, row_id FROM embeddings_queue WHERE processed = FALSE LIMIT 1;")
-        new_entry = cursor.fetchone()
-
-        if new_entry:
-            table_name, row_id = new_entry
-
-            # Process based on the table type
-            if table_name == "stream":
-                process_stream_for_embedding(row_id)
-
-            # Mark entry as processed
-            cursor.execute("UPDATE embeddings_queue SET processed = TRUE WHERE table_name = %s AND row_id = %s;", (table_name, row_id))
-            conn.commit()
-
-            st.success(f"Processed new entry: {table_name} (ID: {row_id}).")
-            time.sleep(1)
-        else:
-            # No new entries, wait before checking again
-            st.info("No new entries found.")
-            time.sleep(10)
-
-# Function to process all streams in batch
-def process_all_streams():
-    try:
-        # Fetch all unique stream_ids from the stream table
-        cursor.execute("SELECT id FROM stream WHERE predicting IS NULL;")
-        stream_ids = cursor.fetchall()
+    def process_all_streams(self):
+        """Process all streams and generate embeddings."""
+        self.cursor.execute("SELECT id FROM stream WHERE predicting IS NULL;")
+        stream_ids = self.cursor.fetchall()
         st.write(f"Found {len(stream_ids)} streams to process.")
 
-        start = 0
+        for idx, (stream_id,) in enumerate(stream_ids):
+            st.write(f"Processing Stream ID {stream_id} ({idx+1}/{len(stream_ids)})...")
+            self.process_stream_for_embedding(stream_id)
+            time.sleep(1)  # Avoid rate-limiting
 
-        for stream_id_tuple in stream_ids:
-            start+=1
-            stream_id = stream_id_tuple[0]
-            process_stream_for_embedding(stream_id)
-            # Pause briefly to avoid hitting rate limits
-            time.sleep(1)
-    except Exception as e:
-        print(f"Error processing all streams: {e}")
+    def process_new_entries(self):
+        """Poll for new entries in the embeddings queue and process them."""
+        while True:
+            try:
+                # Check for new entries in the embeddings queue
+                self.cursor.execute("SELECT table_name, row_id FROM embeddings_queue WHERE processed = FALSE LIMIT 1;")
+                new_entry = self.cursor.fetchone()
 
-# Function to handle user query and find closest matching streams
-def find_closest_streams(user_query, top_n=5):
-    # Generate embedding for the user query
-    query_embedding = get_embedding(user_query)
+                if new_entry:
+                    table_name, row_id = new_entry
 
-    # Fetch precomputed stream metadata embeddings from the database
-    cursor.execute("SELECT id, embedding_vector FROM stream_embeddings")
-    streams = cursor.fetchall()
+                    # Process based on the table type
+                    if table_name == "stream":
+                        self.process_stream_for_embedding(row_id)
 
-    # Calculate the similarity between streams and query
-    embeddings = np.array([np.fromstring(row[1], sep=',') for row in streams])
-    similarities = cosine_similarity([query_embedding], embeddings)[0]
+                    # Mark entry as processed
+                    self.cursor.execute(
+                        "UPDATE embeddings_queue SET processed = TRUE WHERE table_name = %s AND row_id = %s;",
+                        (table_name, row_id)
+                    )
+                    self.conn.commit()
 
-    # Get top N matches
-    top_matches = sorted(zip(similarities, streams), reverse=True)[:top_n]
-    
-    # Fetch data from stream and stream_meta table using stream_id
-    results = []
+                    st.success(f"Processed new entry: {table_name} (ID: {row_id}).")
+                    time.sleep(1)
+                else:
+                    # No new entries, wait before checking again
+                    st.info("No new entries found. Waiting...")
+                    time.sleep(10)
+            except Exception as e:
+                st.error(f"Error processing new entries: {e}")
+                time.sleep(10)
 
-    for similarity, stream in top_matches:
-        stream_id = stream[0]
+    def find_closest_streams(self, user_query, top_n=5):
+        """Find streams most similar to a user query using ChromaDB and fetch all details from PostgreSQL, caching results in Redis."""
+        # # Generate a Redis key for the user query results
+        # results_cache_key = f"query_results:{user_query}:{top_n}"
 
-        cursor.execute("SELECT * FROM stream WHERE id = %s;", (stream_id,))
-        stream_data = cursor.fetchone()
+        # # Check if the results are already cached in Redis
+        # cached_results = self.redis_client.get(results_cache_key)
+        # if cached_results:
+        #     st.info("Using cached results from Redis.")
+        #     return eval(cached_results)  # Convert the stored string back to a Python object
 
-        cursor.execute("SELECT * FROM stream_meta WHERE stream_id = %s", (stream_id,))
-        stream_meta_data = cursor.fetchall()
+        # Generate the embedding for the query
+        collection = self.get_or_create_collection()
 
-        result = {
-            "similarity": similarity,
-            "stream_data": stream_data,
-            "stream_meta_data": stream_meta_data
-        }
-        results.append(result)
-    
-    return results
+        # Query the ChromaDB collection
+        results = collection.query(
+            query_texts=user_query,
+            n_results=top_n
+        )
+
+        stream_ids = []
+
+        for metadata in results["metadatas"][0]:
+            stream_ids.append(metadata['stream_id'])
+        # Extract stream IDs from the results
+
+        # Query PostgreSQL for all details from stream and stream_meta tables
+        placeholders = ','.join(['%s'] * len(stream_ids))
+        query = f"""
+            SELECT 
+                s.*, sm.*
+            FROM 
+                stream AS s
+            LEFT JOIN 
+                stream_meta AS sm
+            ON 
+                s.id = sm.stream_id
+            WHERE 
+                s.id IN ({placeholders})
+        """
+        self.cursor.execute(query, tuple(stream_ids))
+        stream_details = self.cursor.fetchall()
+
+        # Get column names for formatting results
+        stream_columns = [desc[0] for desc in self.cursor.description]
+
+        # Process and format results
+        output = []
+        for i, metadata in enumerate(results["metadatas"][0]):
+            stream_id = metadata["stream_id"]
+            similarity = results["distances"][0][i]
+
+            # Match PostgreSQL data for the stream_id
+            stream_data = next((dict(zip(stream_columns, row)) for row in stream_details if row[0] == stream_id), None)
+
+            if stream_data:
+                output.append({
+                    "rank": i + 1,
+                    "stream_id": stream_id,
+                    "similarity": similarity,
+                    "stream_data": stream_data
+                })
+
+        # # Cache the results in Redis as a string
+        # self.redis_client.set(results_cache_key, str(output))
+        # self.redis_client.expire(results_cache_key, 3600)  # Set an expiration time of 1 hour
+
+        return output
+
 
 # Streamlit App
 st.title("Stream Embeddings and Query Search")
+manager = StreamEmbeddingManager()
 
 menu = st.sidebar.selectbox(
     "Select an option",
-    ["Process All Streams", "Process Single Stream", "Process New Entries", "Query Search"]
+    ["Process New Entries", "Process All Streams", "Process Single Stream", "Query Search"]
 )
 
-if menu == "Process All Streams":
+if menu == "Process New Entries":
+    st.header("Process New Entries")
+    if st.button("Start Processing"):
+        manager.process_new_entries()
+
+elif menu == "Process All Streams":
     st.header("Process All Streams")
     if st.button("Start Processing"):
-        process_all_streams()
+        manager.process_all_streams()
 
 elif menu == "Process Single Stream":
     st.header("Process Single Stream")
     stream_id = st.text_input("Enter Stream ID")
     if st.button("Process"):
         if stream_id:
-            process_stream_for_embedding(stream_id)
+            manager.process_stream_for_embedding(stream_id)
         else:
             st.error("Please enter a valid Stream ID.")
-
-elif menu == "Process New Entries":
-    st.header("Process New Entries")
-    if st.button("Start Processing New Entires"):
-        process_new_entries()
 
 elif menu == "Query Search":
     st.header("Query Search")
@@ -219,11 +233,13 @@ elif menu == "Query Search":
     top_n = st.number_input("Number of results", min_value=1, max_value=20, value=5)
     if st.button("Search"):
         if user_query:
-            results = find_closest_streams(user_query, top_n=top_n)
+            results = manager.find_closest_streams(user_query, top_n=top_n)
             for result in results:
-                st.write(f"**Similarity:** {result['similarity']}")
-                st.write("**Stream Data**", result['stream_data'])
-                st.write("**Stream Meta Data:**", result['stream_meta_data'])
+                st.write(f"**Rank:** {result['rank']} - **Similarity:** {result['similarity']}")
+                st.write("**Stream ID:**", result['stream_id'])
+                st.write("**Stream Data:**")
+                st.json(result['stream_data'])  # Display all fields in JSON format
                 st.write("---")
         else:
             st.error("Please enter a query.")
+
