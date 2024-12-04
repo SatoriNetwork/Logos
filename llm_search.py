@@ -1,20 +1,17 @@
+from fastapi import HTTPException
 import os
 import time
-import redis
-import chromadb
-from dotenv import load_dotenv
 import psycopg2
-import streamlit as st
 import logging
-
+import chromadb
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+from dotenv import load_dotenv
+from openai import OpenAI
 
-# Load environment variables
 load_dotenv()
 
 class StreamEmbeddingManager:
     def __init__(self):
-        # Initialize ChromaDB
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.openai_ef = OpenAIEmbeddingFunction(
             api_key=self.openai_api_key,
@@ -25,7 +22,6 @@ class StreamEmbeddingManager:
         )
         self.collection_name = "satori"
         
-        # PostgreSQL connection
         self.conn = psycopg2.connect(
             database=os.getenv("POSTGRESQL_DB_NAME"),
             user=os.getenv("POSTGRESQL_USER"),
@@ -34,14 +30,6 @@ class StreamEmbeddingManager:
             port=os.getenv("POSTGRESQL_PORT")
         )
         self.cursor = self.conn.cursor()
-
-        # # Redis connection
-        # self.redis_client = redis.Redis(
-        #     host=os.getenv("REDIS_HOST", "localhost"),
-        #     port=os.getenv("REDIS_PORT", 6379),
-        #     db=os.getenv("REDIS_DB", 0),
-        #     decode_responses=True
-        # )
 
     def get_or_create_collection(self):
         """Retrieve or create a collection in ChromaDB."""
@@ -53,8 +41,6 @@ class StreamEmbeddingManager:
 
     def store_embedding(self, stream_id, text):
         """Generate and store embedding in ChromaDB."""
-
-        # Use ChromaDB's embedding function
         collection = self.get_or_create_collection()
         collection.add(
             documents=[text],
@@ -73,8 +59,7 @@ class StreamEmbeddingManager:
         result = self.cursor.fetchone()
 
         if not result:
-            st.error(f"Stream ID {stream_id} not found.")
-            return
+            raise HTTPException(status_code=404, detail=f"Stream ID {stream_id} not found.")
 
         source, description, tags, entity, attribute = result
         text_parts = [
@@ -90,100 +75,41 @@ class StreamEmbeddingManager:
         """Process all streams and generate embeddings."""
         self.cursor.execute("SELECT id FROM stream WHERE predicting IS NULL;")
         stream_ids = self.cursor.fetchall()
-        st.write(f"Found {len(stream_ids)} streams to process.")
-
-        for idx, (stream_id,) in enumerate(stream_ids):
-            st.write(f"Processing Stream ID {stream_id} ({idx+1}/{len(stream_ids)})...")
+        for (stream_id,) in stream_ids:
             self.process_stream_for_embedding(stream_id)
-            time.sleep(1)  # Avoid rate-limiting
-
-    def process_new_entries(self):
-        """Poll for new entries in the embeddings queue and process them."""
-        while True:
-            try:
-                # Check for new entries in the embeddings queue
-                self.cursor.execute("SELECT table_name, row_id FROM embeddings_queue WHERE processed = FALSE LIMIT 1;")
-                new_entry = self.cursor.fetchone()
-
-                if new_entry:
-                    table_name, row_id = new_entry
-
-                    # Process based on the table type
-                    if table_name == "stream":
-                        self.process_stream_for_embedding(row_id)
-
-                    # Mark entry as processed
-                    self.cursor.execute(
-                        "UPDATE embeddings_queue SET processed = TRUE WHERE table_name = %s AND row_id = %s;",
-                        (table_name, row_id)
-                    )
-                    self.conn.commit()
-
-                    st.success(f"Processed new entry: {table_name} (ID: {row_id}).")
-                    time.sleep(1)
-                else:
-                    # No new entries, wait before checking again
-                    st.info("No new entries found. Waiting...")
-                    time.sleep(10)
-            except Exception as e:
-                st.error(f"Error processing new entries: {e}")
-                time.sleep(10)
+            time.sleep(1) 
 
     def find_closest_streams(self, user_query, top_n=5):
-        """Find streams most similar to a user query using ChromaDB and fetch all details from PostgreSQL, caching results in Redis."""
-        # # Generate a Redis key for the user query results
-        # results_cache_key = f"query_results:{user_query}:{top_n}"
-
-        # # Check if the results are already cached in Redis
-        # cached_results = self.redis_client.get(results_cache_key)
-        # if cached_results:
-        #     st.info("Using cached results from Redis.")
-        #     return eval(cached_results)  # Convert the stored string back to a Python object
-
-        # Generate the embedding for the query
+        """Find streams most similar to a user query using ChromaDB."""
         collection = self.get_or_create_collection()
-
-        # Query the ChromaDB collection
         results = collection.query(
             query_texts=user_query,
             n_results=top_n
         )
+        stream_ids = [metadata["stream_id"] for metadata in results["metadatas"][0]]
 
-        stream_ids = []
-
-        for metadata in results["metadatas"][0]:
-            stream_ids.append(metadata['stream_id'])
-        # Extract stream IDs from the results
-
-        # Query PostgreSQL for all details from stream and stream_meta tables
         placeholders = ','.join(['%s'] * len(stream_ids))
         query = f"""
             SELECT 
-                s.*, sm.*
+                s.*, sm.entity, sm.attribute
             FROM 
-                stream AS s
+                stream AS s 
             LEFT JOIN 
-                stream_meta AS sm
+                stream_meta AS sm 
             ON 
-                s.id = sm.stream_id
+                s.id = sm.stream_id 
             WHERE 
                 s.id IN ({placeholders})
         """
         self.cursor.execute(query, tuple(stream_ids))
         stream_details = self.cursor.fetchall()
 
-        # Get column names for formatting results
-        stream_columns = [desc[0] for desc in self.cursor.description]
-
-        # Process and format results
         output = []
+        stream_columns = [desc[0] for desc in self.cursor.description]
         for i, metadata in enumerate(results["metadatas"][0]):
             stream_id = metadata["stream_id"]
             similarity = results["distances"][0][i]
-
-            # Match PostgreSQL data for the stream_id
             stream_data = next((dict(zip(stream_columns, row)) for row in stream_details if row[0] == stream_id), None)
-
             if stream_data:
                 output.append({
                     "rank": i + 1,
@@ -191,55 +117,80 @@ class StreamEmbeddingManager:
                     "similarity": similarity,
                     "stream_data": stream_data
                 })
-
-        # # Cache the results in Redis as a string
-        # self.redis_client.set(results_cache_key, str(output))
-        # self.redis_client.expire(results_cache_key, 3600)  # Set an expiration time of 1 hour
-
         return output
 
 
-# Streamlit App
-st.title("Stream Embeddings and Query Search")
-manager = StreamEmbeddingManager()
-
-menu = st.sidebar.selectbox(
-    "Select an option",
-    ["Process New Entries", "Process All Streams", "Process Single Stream", "Query Search"]
-)
-
-if menu == "Process New Entries":
-    st.header("Process New Entries")
-    if st.button("Start Processing"):
-        manager.process_new_entries()
-
-elif menu == "Process All Streams":
-    st.header("Process All Streams")
-    if st.button("Start Processing"):
-        manager.process_all_streams()
-
-elif menu == "Process Single Stream":
-    st.header("Process Single Stream")
-    stream_id = st.text_input("Enter Stream ID")
-    if st.button("Process"):
-        if stream_id:
-            manager.process_stream_for_embedding(stream_id)
-        else:
-            st.error("Please enter a valid Stream ID.")
-
-elif menu == "Query Search":
-    st.header("Query Search")
-    user_query = st.text_input("Enter your query")
-    top_n = st.number_input("Number of results", min_value=1, max_value=20, value=5)
-    if st.button("Search"):
-        if user_query:
-            results = manager.find_closest_streams(user_query, top_n=top_n)
-            for result in results:
-                st.write(f"**Rank:** {result['rank']} - **Similarity:** {result['similarity']}")
-                st.write("**Stream ID:**", result['stream_id'])
-                st.write("**Stream Data:**")
-                st.json(result['stream_data'])  # Display all fields in JSON format
-                st.write("---")
-        else:
-            st.error("Please enter a query.")
-
+class StreamRAGManager:
+    """
+    A class to manage and explain the relationship between a user query and stream data using OpenAI's API.
+    """
+    
+    def __init__(self):
+        """
+        Initialize the OpenAI client and model name.
+        """
+        self.model_name = "gpt-4o"
+        self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    
+    def format_data_for_api(self, user_query: str, stream: dict) -> str:
+        """
+        Format the user query and stream data into a structured prompt for OpenAI's API.
+        
+        Returns:
+            str: A formatted prompt.
+        """
+        prompt = (
+            f"The user asked: '{user_query}'.\n\n"
+            "Here is the data stream:\n"
+            f"{stream}\n\n"
+            "Explain the relationship between the user's query and the data stream, "
+            "focusing on trends, averages, and relevance to the query. Provide actionable insights."
+        )
+        return prompt
+    
+    def fetch_explanation(self, user_query: str, stream: dict) -> dict:
+        """
+        Use OpenAI's API to generate an explanation of the relationship.
+        
+        Returns:
+            dict: The API response containing the explanation.
+        """
+        try:
+            prompt = self.format_data_for_api(user_query, stream)
+            response = self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "You are assistant to explain the relationship between user's query and data stream"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+            )
+            
+            return {
+                "response": response.choices[0].message.content.strip()
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def explain_relationship(self, user_query: str, streams: list) -> list:
+        """
+        Generate explanations for the relationship between the user query and each data stream.
+        
+        Args:
+            user_query (str): The user's query.
+            streams (list): A list of data streams to analyze.
+        
+        Returns:
+            list: A list of explanations for each stream.
+        """
+        explanations = []
+        for stream in streams:
+            explanation = self.fetch_explanation(user_query, stream)
+            if explanation:
+                explanation_with_stream_id = {
+                    "stream_id": stream["stream_id"],
+                    "explanation": explanation
+                }
+                explanations.append(explanation_with_stream_id)
+        
+        return explanations
