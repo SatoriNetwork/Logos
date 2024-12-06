@@ -1,7 +1,7 @@
 from fastapi import HTTPException
 import os
 import time
-import psycopg2
+import psycopg
 import logging
 import chromadb
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
@@ -22,8 +22,8 @@ class StreamEmbeddingManager:
         )
         self.collection_name = "satori"
         
-        self.conn = psycopg2.connect(
-            database=os.getenv("POSTGRESQL_DB_NAME"),
+        self.conn = psycopg.connect(
+            dbname=os.getenv("POSTGRESQL_DB_NAME"),
             user=os.getenv("POSTGRESQL_USER"),
             password=os.getenv("POSTGRESQL_PASSWORD"),
             host=os.getenv("POSTGRESQL_HOST"),
