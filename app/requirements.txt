@@ -1,8 +1,5 @@
 openai
-psycopg
-python-dotenv
-scikit-learn
-redis
+psycopg[binary,pool]
 python-dotenv
 fastapi
 uvicorn

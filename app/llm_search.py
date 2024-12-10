@@ -40,13 +40,23 @@ class StreamEmbeddingManager:
         )
 
     def store_embedding(self, stream_id, text):
-        """Generate and store embedding in ChromaDB."""
+        """Generate and store embedding in ChromaDB if not already exists."""
         collection = self.get_or_create_collection()
+
+        # Check if embedding for stream_id already exists
+        existing_embeddings = collection.get(ids=[f"stream_{stream_id}"])
+        if existing_embeddings['ids']:  # If IDs are returned, embedding exists
+            logging.info(f"Embedding for Stream ID {stream_id} already exists. Skipping.")
+            return
+
+        # Add new embedding to the collection
         collection.add(
             documents=[text],
             ids=[f"stream_{stream_id}"],
             metadatas=[{"stream_id": stream_id, "text": text}]
         )
+        logging.info(f"Embedding for Stream ID {stream_id} added successfully.")
+
 
     def process_stream_for_embedding(self, stream_id):
         """Process a stream to generate and store its embedding."""
