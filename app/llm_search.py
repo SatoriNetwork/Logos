@@ -132,7 +132,7 @@ class StreamRAGManager:
         self.model_name = "gpt-4o"
         self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     
-    def format_data_for_api(self, user_query: str, stream: dict) -> str:
+    def format_data_for_api(self, user_query: str, streams: list) -> str:
         """
         Format the user query and stream data into a structured prompt for OpenAI's API.
         
@@ -140,15 +140,22 @@ class StreamRAGManager:
             str: A formatted prompt.
         """
         prompt = (
-            f"The user asked: '{user_query}'.\n\n"
-            "Here is the data stream:\n"
-            f"{stream}\n\n"
-            "Explain the relationship between the user's query and the data stream, "
-            "focusing on trends, averages, and relevance to the query. Provide actionable insights."
+            "You are the voice of a future-predicting worldwide network called Satori that analyzes data streams and generates predictions to provide users with clear, confident, and concise insights about future trends..\n\n"
+            f"A user has asked you this question: '{user_query}'.\n\n"
+            "Here are the data streams payload:\n"
+            f"{streams}\n\n"
+            "You are to provide a simple, confident, concise, and honest answer (usually some form of prediction, or insight into the future) to the user's question. "
+            "The data streams payload includes descriptive details and summaries of predictions (made by the Satori network) for data stream(s) that might be relevant to the user's question. "
+            "Analyze the provided data streams payload, focusing on how it can inform an answer to the user's question. "
+            "The user's query may be a detailed question about the data stream(s) in which case the answer can be precise as possible, explaining trends and outcomes, and any relevant information in straightforward language. "
+            "If the user’s query is unrelated to the data, you provide a logical and intuitive response while encouraging more specific questions for deeper insights, you may suggest topics (the topics that the provided the data streams payload describes) for them to ask about. "
+            "You combine the data provided with your intelligent analysis and intuition to make predictions or clarify what trends suggest about the future. "
+            "In short, answer the user's question as best you can. Your tone is clear, direct, concise, simple, pleasant, helpful, and honest, revealing the network's insight with user-friendly communication."
         )
+
         return prompt
     
-    def fetch_explanation(self, user_query: str, stream: dict) -> dict:
+    def fetch_explanation(self, user_query: str, streams: list) -> dict:
         """
         Use OpenAI's API to generate an explanation of the relationship.
         
@@ -156,7 +163,7 @@ class StreamRAGManager:
             dict: The API response containing the explanation.
         """
         try:
-            prompt = self.format_data_for_api(user_query, stream)
+            prompt = self.format_data_for_api(user_query, streams)
             response = self.openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
@@ -165,9 +172,12 @@ class StreamRAGManager:
                 ],
                 temperature=0.7,
             )
+            response_message = response.choices[0].message.content
+            
+            cleaned_response = ' '.join(response_message.split())
             
             return {
-                "response": response.choices[0].message.content.strip()
+                "response": cleaned_response
             }
         except Exception as e:
             return {"error": str(e)}
@@ -184,13 +194,11 @@ class StreamRAGManager:
             list: A list of explanations for each stream.
         """
         explanations = []
-        for stream in streams:
-            explanation = self.fetch_explanation(user_query, stream)
-            if explanation:
-                explanation_with_stream_id = {
-                    "stream_id": stream["stream_id"],
-                    "explanation": explanation
-                }
-                explanations.append(explanation_with_stream_id)
+        explanation = self.fetch_explanation(user_query, streams)
+        if explanation:
+            explanation_with_stream_id = {
+                "explanation": explanation
+            }
+            explanations.append(explanation_with_stream_id)
         
         return explanations
