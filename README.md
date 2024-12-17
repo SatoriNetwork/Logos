@@ -40,7 +40,6 @@ cd ~/repos/Logos/nginx
 docker build -t nginx-proxy .
 
 # Run NGINX with API Key
-export CHROMA_API_KEY="super-secret-key-123"
 docker run -d --name nginx-proxy --network chromadb-network \
     -v /chroma/nginx/.htpasswd:/etc/nginx/.htpasswd:ro \
     -v /chroma/nginx/tls:/etc/nginx/tls:ro \
