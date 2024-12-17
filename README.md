@@ -13,6 +13,7 @@ chmod 755 chroma
 sudo chown 1000:1000 /chroma
 
 # Set up basic auth
+apt install apache2-utils -y
 htpasswd -c /chroma/nginx/.htpasswd admin
 
 # Generate self-signed TLS certificate
