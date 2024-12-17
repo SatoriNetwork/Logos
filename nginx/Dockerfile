@@ -11,9 +11,7 @@ COPY nginx.template.conf /etc/nginx/nginx.template.conf
 EXPOSE 443
 
 # Replace env variables and start NGINX
-CMD envsubst '${CHROMA_API_KEY}' < /etc/nginx/nginx.template.conf > /etc/nginx/conf.d/default.conf && \
-    nginx -g "daemon off;"
-
+CMD ["sh", "-c", "envsubst '${CHROMA_API_KEY}' < /etc/nginx/nginx.template.conf > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
 
 # Build and run the NGINX proxy:
 #export CHROMA_API_KEY="super-secret-key-123"
