@@ -18,7 +18,7 @@ class StreamEmbeddingManager:
             api_key=self.openai_api_key,
             model_name="text-embedding-3-large")
         self.chroma_client = CustomRemoteClient(
-            host="https://your-chromadb-server-ip:443",
+            host="https://159.65.144.150:443",
             api_key=os.getenv("CHROMA_API_KEY"))
         # alternative to using the remote solution we could include the chroma
         # database in the actual docker container and access it like this:
