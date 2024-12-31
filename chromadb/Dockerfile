@@ -15,12 +15,15 @@ ENV CHROMA_PORT=8000
 # Create data directory
 RUN mkdir -p ${CHROMA_DB_PATH} && chown -R 1000:1000 ${CHROMA_DB_PATH}
 
+# Copy startup script
+COPY start.sh /app/start.sh
+
 # Expose ChromaDB port
 EXPOSE 8000
 
 # Start ChromaDB server
-CMD ["chroma", "--path", "/data/chroma", "--bind", "0.0.0.0", "--port", "8000"]
-
+# CMD ["/app/start.sh"]
+CMD ["chroma", "run", "--path", "/data/chroma", "--host", "0.0.0.0", "--port", "8000"]
 
 # docker build -t chromadb-server .
 # docker run -d -p 8000:8000 -v /chroma:/data/chroma --name chromadb chromadb-server
