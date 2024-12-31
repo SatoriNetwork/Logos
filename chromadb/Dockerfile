@@ -19,7 +19,7 @@ RUN mkdir -p ${CHROMA_DB_PATH} && chown -R 1000:1000 ${CHROMA_DB_PATH}
 EXPOSE 8000
 
 # Start ChromaDB server
-CMD ["chroma", "--path", "/data/chroma", "--bind", "0.0.0.0", "--port", "8000"]
+CMD ["chroma", "--path", "/data/chroma", "--host", "0.0.0.0", "--port", "8000"]
 
 
 # docker build -t chromadb-server .
