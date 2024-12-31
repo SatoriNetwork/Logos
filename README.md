@@ -56,6 +56,7 @@ docker run -d --name nginx-proxy --network chromadb-network \
 
 # Run ChromaDB server
 docker run -d --name chromadb --network chromadb-network \
+    -p 127.0.0.1:8000:8000 \
     -v /chroma:/data/chroma \
     chromadb-server
 ```
