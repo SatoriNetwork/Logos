@@ -40,19 +40,12 @@ cd ~/repos/Logos/nginx
 docker build -t nginx-proxy .
 
 # Run NGINX with API Key
-# docker run -d --name nginx-proxy --network chromadb-network \
-#     -v /chroma/nginx/.htpasswd:/etc/nginx/.htpasswd:ro \
-#     -v /chroma/nginx/tls:/etc/nginx/tls:ro \
-#     -p 443:443 \
-#     -e CHROMA_API_KEY=$CHROMA_API_KEY \
-#     nginx-proxy
-docker run -d --name nginx-proxy --network chromadb-network \
-    -v /chroma/nginx/.htpasswd:/etc/nginx/.htpasswd:ro \
-    -v /chroma/nginx/tls:/etc/nginx/tls:ro \
-    -p 443:443 \
-    -e CHROMA_API_KEY="super-secret-key-123" \
-    nginx-proxy
-
+ docker run -d --name nginx-proxy --network chromadb-network \
+     -v /chroma/nginx/.htpasswd:/etc/nginx/.htpasswd:ro \
+     -v /chroma/nginx/tls:/etc/nginx/tls:ro \
+     -p 443:443 \
+     -e CHROMA_API_KEY=$CHROMA_API_KEY \
+     nginx-proxy
 
 # Run ChromaDB server
 docker run -d --name chromadb --network chromadb-network \
